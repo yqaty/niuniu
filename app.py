@@ -37,6 +37,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ---------------------------------------------------------------------------
+# 最新求解结果缓存（内存）
+# ---------------------------------------------------------------------------
+import threading
+from datetime import datetime
+
+_latest_lock = threading.Lock()
+_latest_result: dict | None = None  # {"image_b64": str, "n": int, "time": str, "solution": list}
+
 INDEX_HTML = """
 <!DOCTYPE html>
 <html lang="zh">
@@ -85,6 +94,27 @@ INDEX_HTML = """
   }
   .error { color: #e44; font-weight: bold; }
   .preview { max-width: 100%; max-height: 200px; margin-top: 8px; border-radius: 8px; }
+  .divider {
+    width: 100%; max-width: 400px;
+    border-top: 1px solid #ddd;
+    margin: 24px 0 16px;
+  }
+  .section-title {
+    font-size: 16px; font-weight: 600; color: #555;
+    margin-bottom: 8px; width: 100%; max-width: 400px;
+  }
+  .latest-meta {
+    font-size: 13px; color: #999; margin-bottom: 8px;
+    width: 100%; max-width: 400px;
+  }
+  .latest-img {
+    width: 100%; max-width: 400px; text-align: center;
+  }
+  .latest-img img {
+    max-width: 100%; border-radius: 8px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+  }
+  .empty-hint { font-size: 14px; color: #bbb; padding: 20px 0; }
 </style>
 </head>
 <body>
@@ -100,6 +130,13 @@ INDEX_HTML = """
   <div class="status" id="status"></div>
   <div class="result" id="result"></div>
 
+  <div class="divider"></div>
+  <div class="section-title">最新求解结果</div>
+  <div class="latest-meta" id="latestMeta"></div>
+  <div class="latest-img" id="latestImg">
+    <span class="empty-hint">暂无求解记录</span>
+  </div>
+
 <script>
 const fileInput = document.getElementById('fileInput');
 const uploadArea = document.getElementById('uploadArea');
@@ -107,7 +144,10 @@ const preview = document.getElementById('preview');
 const solveBtn = document.getElementById('solveBtn');
 const status = document.getElementById('status');
 const result = document.getElementById('result');
+const latestMeta = document.getElementById('latestMeta');
+const latestImg = document.getElementById('latestImg');
 let selectedFile = null;
+let lastLatestTime = '';
 
 fileInput.addEventListener('change', (e) => {
   const file = e.target.files[0];
@@ -116,7 +156,6 @@ fileInput.addEventListener('change', (e) => {
   solveBtn.disabled = false;
   result.innerHTML = '';
   status.textContent = '';
-  // 预览
   const reader = new FileReader();
   reader.onload = (ev) => {
     preview.src = ev.target.result;
@@ -146,6 +185,8 @@ async function doSolve() {
       const url = URL.createObjectURL(blob);
       result.innerHTML = '<img src="' + url + '">';
       status.textContent = '求解完成 (' + elapsed + 's)';
+      // 求解成功后立即刷新最新结果
+      fetchLatest();
     } else {
       const err = await resp.json();
       status.textContent = err.error || '求解失败';
@@ -157,6 +198,33 @@ async function doSolve() {
   }
   solveBtn.disabled = false;
 }
+
+async function fetchLatest() {
+  try {
+    const resp = await fetch('/latest');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (!data || !data.image_b64) {
+      latestMeta.textContent = '';
+      latestImg.innerHTML = '<span class="empty-hint">暂无求解记录</span>';
+      return;
+    }
+    // 只在有新结果时更新 DOM，避免闪烁
+    if (data.time === lastLatestTime) return;
+    lastLatestTime = data.time;
+
+    latestMeta.textContent = data.n + 'x' + data.n
+      + '  |  解: [' + data.solution.join(', ') + ']'
+      + '  |  ' + data.time;
+    latestImg.innerHTML = '<img src="data:image/jpeg;base64,' + data.image_b64 + '">';
+  } catch (e) {
+    // 静默失败
+  }
+}
+
+// 页面加载时立即拉取一次，之后每 5 秒轮询
+fetchLatest();
+setInterval(fetchLatest, 5000);
 </script>
 </body>
 </html>
@@ -223,6 +291,19 @@ async def solve_puzzle(
         f"recognize={t_recognize:.3f}s, solve={t_solve:.3f}s, total={t_total:.3f}s"
     )
 
+    # 缓存最新结果（JPEG 用于前端展示）
+    cache_buf = io.BytesIO()
+    result_img.save(cache_buf, format="JPEG", quality=75)
+    cache_b64 = base64.b64encode(cache_buf.getvalue()).decode()
+    with _latest_lock:
+        global _latest_result
+        _latest_result = {
+            "image_b64": cache_b64,
+            "n": board_info.n,
+            "solution": solution,
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
     # 输出图片
     buf = io.BytesIO()
     if fmt.lower() == "png":
@@ -234,6 +315,15 @@ async def solve_puzzle(
     buf.seek(0)
 
     return Response(content=buf.getvalue(), media_type=media_type)
+
+
+@app.get("/latest")
+async def latest():
+    """返回最新一次求解的结果（JSON，含 base64 图片）"""
+    with _latest_lock:
+        if _latest_result is None:
+            return JSONResponse(content=None)
+        return JSONResponse(content=_latest_result)
 
 
 @app.get("/health")
