@@ -14,7 +14,7 @@ import io
 import time
 import base64
 
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, UploadFile, Query
 from fastapi.responses import Response, JSONResponse, HTMLResponse
 from PIL import Image
 
@@ -23,6 +23,19 @@ import solver
 import renderer
 
 app = FastAPI(title="Queens Puzzle Solver", version="1.0.0")
+
+
+# ---------------------------------------------------------------------------
+# CORS —— 允许快捷指令 / 浏览器跨域调用
+# ---------------------------------------------------------------------------
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 INDEX_HTML = """
 <!DOCTYPE html>
@@ -157,9 +170,16 @@ async def index():
 
 
 @app.post("/solve")
-async def solve_puzzle(file: UploadFile = File(...)):
+async def solve_puzzle(
+    file: UploadFile = File(...),
+    fmt: str = Query("jpeg", description="返回格式: jpeg(小) 或 png(无损)"),
+    quality: int = Query(75, ge=10, le=100, description="JPEG 质量 10-100"),
+):
     """
     接收游戏截图，识别并求解 Queens 棋盘，返回标注答案的图片。
+
+    快捷指令建议用默认参数 (jpeg, quality=75)，体积约 50-80KB，传输快。
+    网页端如需高清可传 fmt=png。
     """
     t0 = time.time()
 
@@ -203,12 +223,17 @@ async def solve_puzzle(file: UploadFile = File(...)):
         f"recognize={t_recognize:.3f}s, solve={t_solve:.3f}s, total={t_total:.3f}s"
     )
 
-    # 输出 PNG
+    # 输出图片
     buf = io.BytesIO()
-    result_img.save(buf, format="PNG")
+    if fmt.lower() == "png":
+        result_img.save(buf, format="PNG")
+        media_type = "image/png"
+    else:
+        result_img.save(buf, format="JPEG", quality=quality)
+        media_type = "image/jpeg"
     buf.seek(0)
 
-    return Response(content=buf.getvalue(), media_type="image/png")
+    return Response(content=buf.getvalue(), media_type=media_type)
 
 
 @app.get("/health")
